@@ -6,12 +6,13 @@ import ray
 from ray.experimental.serve.utils import get_custom_object_id, logger
 # from heapq import heappush, heappop 
 from blist import sortedlist
+import time
 class Query:
     def __init__(self, request_body,slo,result_object_id=None):
         self.request_body = request_body
         self.slo = slo
         if result_object_id is None:
-            self.result_object_id = ray.ObjectID.from_random()
+            self.result_object_id = get_custom_object_id()
         else:
             self.result_object_id = result_object_id
     def __lt__(self, other):
@@ -21,7 +22,7 @@ class Query:
 class WorkIntent:
     def __init__(self, work_object_id=None):
         if work_object_id is None:
-            self.work_object_id = ray.ObjectID.from_random()
+            self.work_object_id = get_custom_object_id()
         else:
             self.work_object_id = work_object_id
 
@@ -63,7 +64,7 @@ class CentralizedQueues:
 
     def __init__(self):
         # service_name -> request queue
-        self.queues = defaultdict(sortedlist)
+        self.queues = defaultdict(deque)
 
         # service_name -> max. batch size
         self.service_max_batch_size = {}
@@ -76,7 +77,7 @@ class CentralizedQueues:
 
     def enqueue_request(self, service,request_data,slo=float(1e10)):
         query = Query(request_data,slo)
-        self.queues[service].add(query)
+        self.queues[service].append(query)
         self.flush()
         return query.result_object_id.binary()
 
@@ -117,11 +118,18 @@ class CentralizedQueues:
         return list(backends_in_policy.intersection(available_workers))
 
     def _flush(self):
+        #logger.info('[]')
+        start = time.time()
+        c = 0
+        logger.info('[SRTML/COUNT/NEW]')
         for service, queue in self.queues.items():
             ready_backends = self._get_available_backends(service)
+            c +=1 
+            logger.info('[SRTML/COUNT: {}]'.format(c))
+            y = 0
             # logger.info("Service %s having queue lengths %s ready backends %s", service,len(queue),len(ready_backends))
             while len(queue) and len(ready_backends):
-
+                y += 1
                 # Fast path, only one backend available.
                 # if len(ready_backends) == 1:
                 #     backend = ready_backends[0]
@@ -143,17 +151,22 @@ class CentralizedQueues:
                     # backend_weights /= backend_weights.sum()
                     # chosen_backend = np.random.choice(
                     #     ready_backends, p=backend_weights).squeeze()
-
+                logger.info('[SRTML/INSIDE/COUNT: {}]'.format(y))
                 batch_size = self.service_max_batch_size[service]
                 for backend in ready_backends:
                     if len(queue) == 0:
                         break
                     work = self.workers[backend].popleft()
                     pop_len = min(batch_size,len(queue))
-                    request = [ queue.pop() for i in range(pop_len)]
-                    ray.worker.global_worker.put_object(request,work.work_object_id)
+                    request = [ queue.popleft() for _ in range(pop_len)]
+                    ray.worker.global_worker.put_object(
+                        work.work_object_id, request)
+                    logger.info("[SRTML/FLUSH/PUT/TIME] time.time: {}".format(time.time()))
 
                 ready_backends = self._get_available_backends(service)
+        end = time.time()
+        time_taken = end - start
+        logger.info('[SRTML/FLUSH/TIME] : {} s'.format(time_taken))
 
 
 @ray.remote

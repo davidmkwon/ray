@@ -1,12 +1,15 @@
 import json
-import sqlite3
 from abc import ABC
 
-from ray import cloudpickle as pickle
-
+import ray
 import ray.experimental.internal_kv as ray_kv
 from ray.experimental.serve.utils import logger
 
+# Pipeline will store a DAG of services
+import networkx as nx
+from networkx.readwrite import json_graph
+import traceback
+from ray.experimental.serve.utils import topological_sort_grouped
 
 class NamespacedKVStore(ABC):
     """Abstract base class for a namespaced key-value store.
@@ -81,9 +84,10 @@ class InMemoryKVStore(NamespacedKVStore):
 class RayInternalKVStore(NamespacedKVStore):
     """A NamespacedKVStore implementation using ray's `internal_kv`."""
 
-    def __init__(self, namespace):
+    def __init__(self, index_key,namespace):
         assert ray_kv._internal_kv_initialized()
-        self.index_key = "RAY_SERVE_INDEX"
+        # self.index_key = "RAY_SERVE_INDEX"
+        self.index_key = index_key
         self.namespace = namespace
         self._put(self.index_key, [])
 
@@ -105,10 +109,15 @@ class RayInternalKVStore(NamespacedKVStore):
             self._serialize(value),
             overwrite=True,
         )
+    def _hexists(self,key):
+        return ray_kv._internal_kv_exists(self._format_key(self._serialize(key)))
 
     def _get(self, key):
         return self._deserialize(
             ray_kv._internal_kv_get(self._format_key(self._serialize(key))))
+
+    def exists(self,key):
+        return self._hexists(key)
 
     def get(self, key):
         return self._get(key)
@@ -129,49 +138,116 @@ class RayInternalKVStore(NamespacedKVStore):
             data[self._remove_format_key(key)] = self._get(key)
         return data
 
+# A class which stores pipeline name and it's dependent service
+class KVPipelineProxy:
+    def __init__(self, kv_class=RayInternalKVStore):
+        self.pipeline_storage = kv_class(index_key = "RAY_PIPELINE_INDEX",namespace="pipelines")
+        self.request_count = 0
+        self.provision_pipeline_cnt = {}
 
-class SQLiteKVStore(NamespacedKVStore):
-    def __init__(self, namespace, db_path):
-        self.namespace = namespace
-        self.conn = sqlite3.connect(db_path)
-
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS {} (key TEXT UNIQUE, value TEXT)".
-            format(self.namespace))
-        self.conn.commit()
-
-    def put(self, key, value):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO {} (key, value) VALUES (?,?)".format(
-                self.namespace), (key, value))
-        self.conn.commit()
-
-    def get(self, key, default=None):
-        cursor = self.conn.cursor()
-        result = list(
-            cursor.execute(
-                "SELECT value FROM {} WHERE key = (?)".format(self.namespace),
-                (key, )))
-        if len(result) == 0:
-            return default
+    def add_node(self,pipeline: str, service_no_http_1: str):
+        if self.pipeline_storage.exists(pipeline):
+            g_json = self.pipeline_storage.get(pipeline)
+            G = json_graph.node_link_graph(g_json)
         else:
-            # Due to UNIQUE constraint, there can only be one value.
-            value, *_ = result[0]
-            return value
+            G = nx.DiGraph()
+        G = nx.OrderedDiGraph(G)
+        G.add_node(service_no_http_1)
+        g_json = json_graph.node_link_data(G)
+        self.pipeline_storage.put(pipeline,g_json)
 
-    def as_dict(self):
-        cursor = self.conn.cursor()
-        result = list(
-            cursor.execute("SELECT key, value FROM {}".format(self.namespace)))
-        return dict(result)
+    # Adds directed edge from service_no_http_1 --> service_no_http_2 in service DAG for pipeline
+    def add_edge(self,pipeline: str, service_no_http_1: str , service_no_http_2: str):
+
+        if self.pipeline_storage.exists(pipeline):
+            g_json = self.pipeline_storage.get(pipeline)
+            G = json_graph.node_link_graph(g_json)
+        else:
+            G = nx.DiGraph()
+        G = nx.OrderedDiGraph(G)
+
+        # try:
+        #    G.add_edge(service_no_http_1,service_no_http_2)
+        #    if not nx.is_directed_acyclic_graph(G) :
+        #         G.remove_edge(service_no_http_1,service_no_http_2)
+        #         raise Exception('This service dependency creates a cycle!')
+        # except Exception:
+        #     traceback_str = ray.utils.format_error_message(traceback.format_exc())
+        #     return ray.exceptions.RayTaskError(str(add_edge), traceback_str)
 
 
-# Tables
-class RoutingTable:
-    def __init__(self, kv_connector):
-        self.routing_table = kv_connector("routing_table")
+
+        G.add_edge(service_no_http_1,service_no_http_2)
+        g_json = json_graph.node_link_data(G)
+        self.pipeline_storage.put(pipeline,g_json)
+
+    def provision(self,pipeline: str):
+        try :
+            if self.pipeline_storage.exists(pipeline):
+                g_json = self.pipeline_storage.get(pipeline)
+                G = json_graph.node_link_graph(g_json)
+                G = nx.OrderedDiGraph(G)
+                if nx.is_directed_acyclic_graph(G):
+                    node_order = list(topological_sort_grouped(G))
+                else:
+                    raise Exception('Service dependencies contain cycle')
+
+                # node_order = list(nx.topological_sort(G))
+                predecessors_d = {}
+                for node in G:
+                    predecessors_d[node] = list(G.predecessors(node))
+                final_d = {'node_order': node_order , 'predecessors' : predecessors_d}
+                self.pipeline_storage.put(pipeline,final_d)
+                self.provision_pipeline_cnt[pipeline] = 1
+            else:
+                self.provision_pipeline_cnt[pipeline] = 0
+                raise Exception('Add service dependencies to pipeline')
+        except Exception:
+            self.provision_pipeline_cnt[pipeline] = 0
+            traceback_str = ray.utils.format_error_message(traceback.format_exc())
+            return ray.exceptions.RayTaskError('Issue with provisioning pipeline', traceback_str)
+
+
+    def list_pipeline_service(self):
+        # assert self.provision_pipeline_cnt == 1
+        self.request_count += 1
+        table = self.pipeline_storage.as_dict()
+        return table
+    def get_dependency(self,pipeline: str):
+        try:
+            # assert self.provision_pipeline_cnt[pipeline] == 1
+            if self.pipeline_storage.exists(pipeline):
+                final_d = self.pipeline_storage.get(pipeline)
+                if type(final_d) is dict:
+                    return final_d
+                else:
+                    raise Exception('Getting dependency before provisioning pipeline' )
+                return final_d
+            else:
+                raise Exception('Pipeline does not exists!' )
+        except Exception:
+            traceback_str = ray.utils.format_error_message(traceback.format_exc())
+            return ray.exceptions.RayTaskError('Issue with getting dependencies', traceback_str)
+
+    def get_request_count(self):
+        """Return the number of requests that fetched the routing table.
+
+        This method is used for two purpose:
+
+        1. Make sure HTTP server has started and healthy. Incremented request
+           count means HTTP server is actively fetching routing table.
+
+        2. Make sure HTTP server does not have stale routing table. This number
+           should be incremented every HTTP_ROUTER_CHECKER_INTERVAL_S seconds.
+           Supervisor should check this number as indirect indicator of http
+           server's health.
+        """
+        return self.request_count
+
+    
+class KVStoreProxy:
+    def __init__(self, kv_class=InMemoryKVStore):
+        self.routing_table = kv_class(index_key = "RAY_SERVE_INDEX",namespace="routes")
         self.request_count = 0
 
     def register_service(self, route: str, service: str):
@@ -208,45 +284,12 @@ class RoutingTable:
         return self.request_count
 
 
-class BackendTable:
-    def __init__(self, kv_connector):
-        self.backend_table = kv_connector("backend_creator")
-        self.replica_table = kv_connector("replica_table")
+@ray.remote
+class KVStoreProxyActor(KVStoreProxy):
+    def __init__(self, kv_class=RayInternalKVStore):
+        super().__init__(kv_class=kv_class)
 
-    def register_backend(self, backend_tag: str, backend_creator):
-        backend_creator_serialized = pickle.dumps(backend_creator)
-        self.backend_table.put(backend_tag, backend_creator_serialized)
-
-    def get_backend_creator(self, backend_tag):
-        return pickle.loads(self.backend_table.get(backend_tag))
-
-    def list_backends(self):
-        return list(self.backend_table.as_dict().keys())
-
-    def list_replicas(self, backend_tag: str):
-        return json.loads(self.replica_table.get(backend_tag, "[]"))
-
-    def add_replica(self, backend_tag: str, new_replica_tag: str):
-        replica_tags = self.list_replicas(backend_tag)
-        replica_tags.append(new_replica_tag)
-        self.replica_table.put(backend_tag, json.dumps(replica_tags))
-
-    def remove_replica(self, backend_tag):
-        replica_tags = self.list_replicas(backend_tag)
-        removed_replica = replica_tags.pop()
-        self.replica_table.put(backend_tag, json.dumps(replica_tags))
-        return removed_replica
-
-
-class TrafficPolicyTable:
-    def __init__(self, kv_connector):
-        self.traffic_policy_table = kv_connector("traffic_policy")
-
-    def register_traffic_policy(self, service_name, policy_dict):
-        self.traffic_policy_table.put(service_name, json.dumps(policy_dict))
-
-    def list_traffic_policy(self):
-        return {
-            service: json.loads(policy)
-            for service, policy in self.traffic_policy_table.as_dict()
-        }
+@ray.remote
+class KVPipelineProxyActor(KVPipelineProxy):
+    def __init__(self, kv_class=RayInternalKVStore):
+        super().__init__(kv_class=kv_class)
