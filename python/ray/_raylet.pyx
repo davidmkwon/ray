@@ -1587,13 +1587,21 @@ cdef class CoreWorker:
 
         return ref_counts
 
-    def set_get_async_callback(self, ObjectRef object_ref, callback):
+    def set_get_async_callback(self, ObjectRef object_ref, callback, deserialize):
+        callback._objectref = object_ref
         cpython.Py_INCREF(callback)
-        CCoreWorkerProcess.GetCoreWorker().GetAsync(
-            object_ref.native(),
-            async_callback,
-            <void*>callback
-        )
+        if deserialize:
+            CCoreWorkerProcess.GetCoreWorker().GetAsync(
+                object_ref.native(),
+                async_callback,
+                <void*>callback
+            )
+        else:
+            CCoreWorkerProcess.GetCoreWorker().GetAsync(
+                    object_ref.native(),
+                    async_callback_no_deserialize,
+                    <void*>callback
+                )
 
     def push_error(self, JobID job_id, error_type, error_message,
                    double timestamp):
@@ -1624,4 +1632,25 @@ cdef void async_callback(shared_ptr[CRayObject] obj,
 
     py_callback = <object>user_callback
     py_callback(result)
+    cpython.Py_DECREF(py_callback)
+
+cdef void async_callback_no_deserialize(shared_ptr[CRayObject] obj,
+                         CObjectID object_ref,
+                         void *user_callback) with gil:
+    cdef:
+        c_vector[shared_ptr[CRayObject]] objects_to_deserialize
+
+    # Object is retrieved from in memory store.
+    # Here we go through the code path used to deserialize objects.
+    """
+    objects_to_deserialize.push_back(obj)
+    data_metadata_pairs = RayObjectsToDataMetadataPairs(
+        objects_to_deserialize)
+    ids_to_deserialize = [ObjectRef(object_ref.Binary())]
+    result = ray.worker.global_worker.deserialize_objects(
+        data_metadata_pairs, ids_to_deserialize)[0]
+    """
+
+    py_callback = <object>user_callback
+    py_callback(py_callback._objectref)
     cpython.Py_DECREF(py_callback)
