@@ -1594,13 +1594,13 @@ cdef class CoreWorker:
             CCoreWorkerProcess.GetCoreWorker().GetAsync(
                 object_ref.native(),
                 async_callback,
-                <void*>callback
+                <void*>callback, deserialize
             )
         else:
             CCoreWorkerProcess.GetCoreWorker().GetAsync(
                     object_ref.native(),
                     async_callback_no_deserialize,
-                    <void*>callback
+                    <void*>callback, deserialize
                 )
 
     def push_error(self, JobID job_id, error_type, error_message,
@@ -1637,9 +1637,6 @@ cdef void async_callback(shared_ptr[CRayObject] obj,
 cdef void async_callback_no_deserialize(shared_ptr[CRayObject] obj,
                          CObjectID object_ref,
                          void *user_callback) with gil:
-    cdef:
-        c_vector[shared_ptr[CRayObject]] objects_to_deserialize
-
     # Object is retrieved from in memory store.
     # Here we go through the code path used to deserialize objects.
     """

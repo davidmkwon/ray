@@ -62,7 +62,7 @@ def register_callback(
             # else:
 
             def set_future():
-                # print("Result set")
+                # print("Result set", flush=True)
                 first_async_future.set_result(completed_objectref)
 
             loop.call_soon_threadsafe(set_future)
@@ -244,7 +244,13 @@ def driver(num_replicas, uv):
     if uv:
         asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     for i in range(2):
-        ray.init()
+        ray.init(
+            _system_config={
+                # "max_direct_call_object_size": 0,
+                # "distributed_ref_counting_enabled": False,
+                "record_ref_creation_sites": False,
+            }
+        )
         if i == 0:
             NUM_REPLICAS_A, NUM_REPLICAS_B = num_replicas, num_replicas
 
@@ -322,7 +328,6 @@ def driver(num_replicas, uv):
             f"B Replicas: {NUM_REPLICAS_B}"
         )
         print(ray.get(router_handle.enqueue_request.remote("A", [100])))
-
         ray.shutdown()
     # return qps
 

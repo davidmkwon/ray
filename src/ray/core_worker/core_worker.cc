@@ -2491,19 +2491,20 @@ void CoreWorker::YieldCurrentFiber(FiberEvent &event) {
 }
 
 void CoreWorker::GetAsync(const ObjectID &object_id, SetResultCallback success_callback,
-                          void *python_future) {
+                          void *python_future, bool fetch_plasma_data) {
   auto fallback_callback =
       std::bind(&CoreWorker::PlasmaCallback, this, success_callback,
                 std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
 
-  memory_store_->GetAsync(object_id, [python_future, success_callback, fallback_callback,
-                                      object_id](std::shared_ptr<RayObject> ray_object) {
-    if (ray_object->IsInPlasmaError()) {
-      fallback_callback(ray_object, object_id, python_future);
-    } else {
-      success_callback(ray_object, object_id, python_future);
-    }
-  });
+  memory_store_->GetAsync(
+      object_id, [python_future, success_callback, fallback_callback, object_id,
+                  fetch_plasma_data](std::shared_ptr<RayObject> ray_object) {
+        if (ray_object->IsInPlasmaError() && fetch_plasma_data) {
+          fallback_callback(ray_object, object_id, python_future, fetch_plasma_data);
+        } else {
+          success_callback(ray_object, object_id, python_future);
+        }
+      });
 }
 
 void CoreWorker::PlasmaCallback(SetResultCallback success,

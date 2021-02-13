@@ -941,7 +941,7 @@ class CoreWorker : public rpc::CoreWorkerServiceHandler {
   /// \param[in] python_future the void* object to be passed to SetResultCallback
   /// \return void
   void GetAsync(const ObjectID &object_id, SetResultCallback success_callback,
-                void *python_future);
+                void *python_future, bool fetch_plasma_data = true);
 
  private:
   void SetCurrentTaskId(const TaskID &task_id);
