@@ -9,6 +9,7 @@ import io
 import os
 import ray
 from pprint import pprint
+import subprocess
 
 import pandas as pd
 import click
@@ -20,6 +21,9 @@ from collections import deque, defaultdict
 import uvloop
 import click
 import numpy as np
+from server import HTTPProxyActor
+import requests
+from utils import get_latency_stats, generate_fixed_arrival_process
 
 
 def register_callback(
@@ -213,10 +217,10 @@ class PredictModelPytorch:
 
 
 @click.command()
-@click.option("--num-replicas", type=int, default=1)
 @click.option("--uv", type=bool, default=True)
-def driver(num_replicas, uv):
-    print(f"[config] # Replicas: {num_replicas} uvloop: {uv}")
+@click.option("--save", type=str, default="image_prepoc_no_plasma_fetch.npy")
+def driver(uv, save):
+    print(f"[config] #  uvloop: {uv}")
     if uv:
         asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -228,7 +232,7 @@ def driver(num_replicas, uv):
         }
     )
 
-    NUM_REPLICAS_A, NUM_REPLICAS_B = num_replicas, num_replicas
+    NUM_REPLICAS_A, NUM_REPLICAS_B = 3, 4
     # ray.init()
     router_handle = DequeRouter.remote(uv)
     source = "preprocess"
@@ -269,50 +273,50 @@ def driver(num_replicas, uv):
 
     img = open("elephant.jpg", "rb").read()
 
-    mean_qps = 0.0
-    AVG_CALC = 1
-    mean_closed_loop = 0.0
-    CLOSED_LOOP_LATENCY_ITER = 500
-    for _ in range(AVG_CALC):
-        # throughput measurement
-        WARMUP, NUM_REQUESTS = 200, 1000
-        future = [
-            router_handle.enqueue_request.remote(source, img)
-            for _ in range(WARMUP)
-        ]
-        ray.wait(future, num_returns=WARMUP)
-        del future
+    arrival_curve = generate_fixed_arrival_process(
+        mean_qps=100, cv=0, num_requests=2000,
+    ).tolist()
 
-        futures = [
-            router_handle.enqueue_request.remote(source, img)
-            for _ in range(NUM_REQUESTS)
-        ]
-
-        start_time = time.perf_counter()
-        ray.wait(futures, num_returns=NUM_REQUESTS)
-        # get_data(futures)
-        end_time = time.perf_counter()
-        duration = end_time - start_time
-        qps = NUM_REQUESTS / duration
-        mean_qps += qps
-        sum_closed_loop = 0.0
-        for _ in range(CLOSED_LOOP_LATENCY_ITER):
-            start = time.perf_counter()
-            ray.get(router_handle.enqueue_request.remote(source, img))
-            end = time.perf_counter()
-            sum_closed_loop += end - start
-        mean_closed_loop += sum_closed_loop / CLOSED_LOOP_LATENCY_ITER
-        del futures
-
-    final_qps = mean_qps / AVG_CALC
-    mean_closed_loop = mean_closed_loop / AVG_CALC
-    print(f"Image Preprocessing Pipeline")
-    print(
-        f"Throughput QPS: {final_qps} Prepoc Replicas: {NUM_REPLICAS_A} "
-        f"Mean Closed Loop Latency: {mean_closed_loop} "
-        f"Classifier Replicas: {NUM_REPLICAS_B}"
+    # throughput measurement
+    WARMUP, NUM_REQUESTS = 200, 1000
+    future = [
+        router_handle.enqueue_request.remote(source, img)
+        for _ in range(WARMUP)
+    ]
+    ray.wait(future, num_returns=WARMUP)
+    del future
+    http_actor = HTTPProxyActor.remote(host="127.0.0.1", port=8000)
+    ray.get(
+        http_actor.register_route.remote("/resnet50", router_handle, source)
     )
-    print(ray.get(router_handle.enqueue_request.remote(source, img)))
+    ray.get(http_actor.init_latency.remote())
+
+    ls_output = subprocess.Popen(
+        [
+            "go",
+            "run",
+            "client.go",
+            "60.0",
+            "elephant.jpg",
+            *[str(val) for val in arrival_curve],
+        ]
+    )
+    ls_output.communicate()
+    latency_list = ray.get(http_actor.get_latency.remote())
+    ingest_mu, latency_ms, p95_ms, p99_ms = get_latency_stats(
+        collected_latency=latency_list
+    )
+    print(
+        f"MU: {100} QPS CV: {0}\n"
+        f"Replica-> Prepoc: {NUM_REPLICAS_A}, Resnet50: {NUM_REPLICAS_B}\n"
+        f"p95(ms): {p95_ms} p99(ms): {p99_ms}"
+    )
+    np.save(save, latency_ms)
+
+    # print("From HTTP")
+    # print(requests.post("http://localhost:8000/resnet50", data=img).json())
+    # print("From Python")
+    # print(ray.get(router_handle.enqueue_request.remote(source, img)))
     ray.shutdown()
     # return qps
 
