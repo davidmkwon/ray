@@ -9,6 +9,7 @@ import io
 import os
 import ray
 from pprint import pprint
+import warnings
 
 import pandas as pd
 import click
@@ -183,7 +184,7 @@ class Transform:
         if data.mode != "RGB":
             data = data.convert("RGB")
         data = self.transform(data)
-        return data
+        return data.numpy()
         #     data_list.append(data)
         # return data_list
 
@@ -199,11 +200,12 @@ class PredictModelPytorch:
     def __init__(self, model_name: str, is_cuda: bool = False) -> None:
         self.model = models.__dict__[model_name](pretrained=True)
         self.is_cuda = is_cuda
+        warnings.filterwarnings("ignore")
         if is_cuda:
             self.model = self.model.cuda()
 
     def __call__(self, data: list) -> list:
-        data = torch.stack([data])
+        data = torch.stack([torch.from_numpy(data)])
         data = Variable(data)
         if self.is_cuda:
             data = data.cuda()
@@ -222,7 +224,9 @@ def driver(num_replicas, uv):
 
     ray.init(
         _system_config={
-            # "max_direct_call_object_size": 0,
+           # "max_direct_call_object_size": 112*1024,
+             "enable_timeline": False,
+            # "debug_dump_period_milliseconds": -1,
             # "distributed_ref_counting_enabled": False,
             "record_ref_creation_sites": False,
         }
