@@ -2500,7 +2500,7 @@ void CoreWorker::GetAsync(const ObjectID &object_id, SetResultCallback success_c
       object_id, [python_future, success_callback, fallback_callback, object_id,
                   fetch_plasma_data](std::shared_ptr<RayObject> ray_object) {
         if (ray_object->IsInPlasmaError() && fetch_plasma_data) {
-          fallback_callback(ray_object, object_id, python_future, fetch_plasma_data);
+          fallback_callback(ray_object, object_id, python_future);
         } else {
           success_callback(ray_object, object_id, python_future);
         }
