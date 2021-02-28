@@ -58,7 +58,11 @@ cdef class ObjectRef(BaseID):
 
     cdef size_t hash(self):
         return self.data.Hash()
-
+    
+    def add_ownership(self):
+        core_worker = ray.worker.global_worker.core_worker
+        core_worker.add_ownership(self)
+        
     @classmethod
     def nil(cls):
         return cls(CObjectID.Nil().Binary())
@@ -66,6 +70,12 @@ cdef class ObjectRef(BaseID):
     @classmethod
     def from_random(cls):
         return cls(CObjectID.FromRandom().Binary())
+
+    @classmethod
+    def owned_plasma_objectref(cls):
+        ref =  cls(CObjectID.FromRandom().Binary())
+        ref.add_ownership()
+        return ref
 
     def __await__(self):
         return self.as_future().__await__()

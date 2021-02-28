@@ -832,7 +832,16 @@ rpc::Address CoreWorker::GetOwnerAddress(const ObjectID &object_id) const {
          "at https://github.com/ray-project/ray/issues/";
   return owner_address;
 }
-
+void CoreWorker::CheckAndGetOwnershipInfo(const ObjectID &object_id,
+                                          rpc::Address *owner_address) {
+  auto has_owner = reference_counter_->GetOwner(object_id, owner_address);
+  if (!has_owner) {
+    *owner_address = GetRpcAddress();
+  }
+}
+void CoreWorker::PlacePlasmaDummy(const ObjectID &object_id) {
+  RAY_CHECK(memory_store_->Put(RayObject(rpc::ErrorType::OBJECT_IN_PLASMA), object_id));
+}
 void CoreWorker::GetOwnershipInfo(const ObjectID &object_id,
                                   rpc::Address *owner_address) {
   auto has_owner = reference_counter_->GetOwner(object_id, owner_address);
@@ -855,6 +864,14 @@ void CoreWorker::RegisterOwnershipInfoAndResolveFuture(
   // We will ask the owner about the object until the object is
   // created or we can no longer reach the owner.
   future_resolver_->ResolveFutureAsync(object_id, owner_address);
+}
+
+void CoreWorker::RegisterOwnershipInfo(const ObjectID &object_id,
+                                       const ObjectID &outer_object_id,
+                                       const rpc::Address &owner_address) {
+  // Add the object's owner to the local metadata in case it gets serialized
+  // again.
+  reference_counter_->AddBorrowedObject(object_id, outer_object_id, owner_address);
 }
 
 Status CoreWorker::SetClientOptions(std::string name, int64_t limit_bytes) {
@@ -2496,15 +2513,15 @@ void CoreWorker::GetAsync(const ObjectID &object_id, SetResultCallback success_c
       std::bind(&CoreWorker::PlasmaCallback, this, success_callback,
                 std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
 
-  memory_store_->GetAsync(
-      object_id, [python_future, success_callback, fallback_callback, object_id,
-                  fetch_plasma_data](std::shared_ptr<RayObject> ray_object) {
-        if (ray_object->IsInPlasmaError() && fetch_plasma_data) {
-          fallback_callback(ray_object, object_id, python_future);
-        } else {
-          success_callback(ray_object, object_id, python_future);
-        }
-      });
+  memory_store_->GetAsync(object_id,
+                          [python_future, success_callback, fallback_callback, object_id,
+                           fetch_plasma_data](std::shared_ptr<RayObject> ray_object) {
+                            if (ray_object->IsInPlasmaError() && fetch_plasma_data) {
+                              fallback_callback(ray_object, object_id, python_future);
+                            } else {
+                              success_callback(ray_object, object_id, python_future);
+                            }
+                          });
 }
 
 void CoreWorker::PlasmaCallback(SetResultCallback success,

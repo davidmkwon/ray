@@ -461,7 +461,11 @@ class CoreWorker : public rpc::CoreWorkerServiceHandler {
   void RegisterOwnershipInfoAndResolveFuture(const ObjectID &object_id,
                                              const ObjectID &outer_object_id,
                                              const rpc::Address &owner_address);
+  void RegisterOwnershipInfo(const ObjectID &object_id, const ObjectID &outer_object_id,
+                             const rpc::Address &owner_address);
 
+  void CheckAndGetOwnershipInfo(const ObjectID &object_id, rpc::Address *owner_address);
+  void PlacePlasmaDummy(const ObjectID &object_id);
   ///
   /// Public methods related to storing and retrieving objects.
   ///

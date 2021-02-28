@@ -157,10 +157,18 @@ cdef extern from "ray/core_worker/core_worker.h" nogil:
         void PromoteObjectToPlasma(const CObjectID &object_id)
         void GetOwnershipInfo(const CObjectID &object_id,
                               CAddress *owner_address)
+        void CheckAndGetOwnershipInfo(const CObjectID &object_id,
+                              CAddress *owner_address)
         void RegisterOwnershipInfoAndResolveFuture(
                 const CObjectID &object_id,
                 const CObjectID &outer_object_id,
                 const CAddress &owner_address)
+        
+        void RegisterOwnershipInfo(
+                const CObjectID &object_id,
+                const CObjectID &outer_object_id,
+                const CAddress &owner_address)
+        void PlacePlasmaDummy(const CObjectID &object_id);
 
         CRayStatus SetClientOptions(c_string client_name, int64_t limit)
         CRayStatus Put(const CRayObject &object,

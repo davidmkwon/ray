@@ -931,6 +931,8 @@ cdef class CoreWorker:
                             size_t data_size, ObjectRef object_ref,
                             c_vector[CObjectID] contained_ids,
                             CObjectID *c_object_id, shared_ptr[CBuffer] *data):
+        cdef:
+            CAddress c_owner_address = CAddress()
         if object_ref is None:
             with nogil:
                 check_status(CCoreWorkerProcess.GetCoreWorker().CreateOwned(
@@ -939,9 +941,10 @@ cdef class CoreWorker:
         else:
             c_object_id[0] = object_ref.native()
             with nogil:
+                CCoreWorkerProcess.GetCoreWorker().CheckAndGetOwnershipInfo(c_object_id[0], &c_owner_address)
+
                 check_status(CCoreWorkerProcess.GetCoreWorker().CreateExisting(
-                            metadata, data_size, c_object_id[0],
-                            CCoreWorkerProcess.GetCoreWorker().GetRpcAddress(),
+                            metadata, data_size, c_object_id[0], c_owner_address,
                             data))
 
         # If data is nullptr, that means the ObjectRef already existed,
@@ -1426,8 +1429,21 @@ cdef class CoreWorker:
 
     def add_object_ref_reference(self, ObjectRef object_ref):
         # Note: faster to not release GIL for short-running op.
-        CCoreWorkerProcess.GetCoreWorker().AddLocalReference(
-            object_ref.native())
+        CCoreWorkerProcess.GetCoreWorker().AddLocalReference(object_ref.native())
+    
+    def add_ownership(self, ObjectRef object_ref):
+        cdef:
+            CObjectID c_object_id = object_ref.native()
+            CObjectID c_object_id_outer = CObjectID.Nil()
+            CAddress address = CCoreWorkerProcess.GetCoreWorker().GetRpcAddress()
+        # TODO(alind): Check if we need promote OID to plasma
+        CCoreWorkerProcess.GetCoreWorker().RegisterOwnershipInfo(c_object_id, c_object_id_outer, address
+        )
+        CCoreWorkerProcess.GetCoreWorker().PlacePlasmaDummy(c_object_id)
+        
+    
+    
+    
 
     def remove_object_ref_reference(self, ObjectRef object_ref):
         # Note: faster to not release GIL for short-running op.
