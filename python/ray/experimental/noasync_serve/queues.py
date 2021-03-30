@@ -1,4 +1,5 @@
 import click
+import time
 from blist import sortedlist
 from collections import defaultdict, deque
 
@@ -69,7 +70,7 @@ class CentralizedQueues:
         # service_name -> traffic_policy
         self.traffic = defaultdict(dict)
         # backend_name -> worker queue
-        self.workers = defaultdict(deque)
+        self.worker_handles = defaultdict(deque)
 
     def enqueue_request(self, service, request_data, slo=float(1e10)):
         query = Query(request_data, slo)
@@ -80,11 +81,12 @@ class CentralizedQueues:
     def set_max_batch(self, service, max_batch):
         self.service_max_batch_size[service] = max_batch
 
-    def dequeue_request(self, backend):
-        intention = WorkIntent()
-        self.workers[backend].append(intention)
+    def dequeue_request(self, backend, worker_handle):
+        #intention = WorkIntent()
+        #TODO: wrap all OIDs passed in lists
+        self.worker_handles[backend].append(worker_handle)
         self.flush()
-        return intention.work_object_id
+        #return intention.work_object_id
 
     def link(self, service, backend):
         #logger.debug("Link %s with %s", service, backend)
@@ -108,54 +110,42 @@ class CentralizedQueues:
         backends_in_policy = set(self.traffic[service].keys())
         available_workers = {
             backend
-            for backend, queues in self.workers.items() if len(queues) > 0
+            for backend, queues in self.worker_handles.items() if len(queues) > 0
         }
         return list(backends_in_policy.intersection(available_workers))
 
     def _flush_batch(self):
-        #print("entered flush")
         for service, queue in self.queues.items():
-            #print("entered first loop")
             ready_backends = self._get_available_backends(service)
-            #print("ready_backends:", ready_backends)
             # logger.info("Service %s having queue lengths %s ready backends %s", service,len(queue),len(ready_backends))
             while len(queue) and len(ready_backends):
-                #print("entered second loop")
                 #batch_size = self.service_max_batch_size[service]
-                batch_size = 0
+                batch_size = 5
                 for backend in ready_backends:
-                    #print("entered third loop")
                     if len(queue) == 0:
                         break
-                    work = self.workers[backend].popleft()
+                    worker_handle = self.worker_handles[backend].popleft()
                     pop_len = min(batch_size,len(queue))
                     request = [ queue.pop() for i in range(pop_len)]
-                    #ray.worker.global_worker.put_object(request, work.work_object_id)
                     #print("putting request into work OID")
-                    ray.put(request, work.work_object_id)
-                    #print("put request into work OID")
+                    worker_handle.__call__.remote(request)
+                    #print("called worker execute")
 
                 ready_backends = self._get_available_backends(service)
 
     def _flush_single(self):
-        #print("entered flush")
         for service, queue in self.queues.items():
-            #print("entered first loop")
             ready_backends = self._get_available_backends(service)
-            #print("ready_backends:", ready_backends)
             # logger.info("Service %s having queue lengths %s ready backends %s", service,len(queue),len(ready_backends))
             while len(queue) and len(ready_backends):
-                #print("entered second loop")
                 for backend in ready_backends:
-                    #print("entered third loop")
                     if len(queue) == 0:
                         break
-                    work_intent = self.workers[backend].popleft()
-                    request = queue.pop()
-                    #ray.worker.global_worker.put_object(request, work.work_object_id)
-                    #print("putting request into work OID")
-                    ray.put(request, work_intent.work_object_id)
-                    #print("put request into work OID")
+                    worker_handle = self.worker_handles[backend].popleft()
+                    request = [queue.pop()]
+                    #print("put request in work OID")
+                    worker_handle.__call__.remote(request)
+                    #print("called worker execute")
 
                 ready_backends = self._get_available_backends(service)
 
@@ -169,6 +159,6 @@ class CentralizedQueuesActor(CentralizedQueues):
 
     def flush(self):
         if self.self_handle:
-            self.self_handle._flush.remote()
+            self.self_handle._flush_single.remote()
         else:
             self._flush_single()

@@ -1,40 +1,84 @@
 import ray
 
-@ray.remote
 class Worker:
-    """
-    Very basic draft of worker replica in router
-    """
-    def __init__(self, name, func, router_handle):
-        # TODO: add more fields
+    '''
+    Base Worker class to override. NOTE this is not a ray actor, so deriving class
+    must use `ray.remote()` decorator
+    '''
+    def __init__(self, name, router_handle, func):
         self.name = name
-        self.func = func
         self._router_handle = router_handle
+        self.func = func
         self._my_handle = None
 
-    def poll_router(self, my_handle):
+    def __call__(self, requests):
+        '''
+        Calls self.func on requests passed by router, and then rejoins router queue
+        '''
+        for request in requests:
+            # get params
+            request_result_object_id = request.result_object_id
+            request_body = request.request_body
+
+            # execute request
+            output = self.func(request_body)
+
+            # put output into result_id
+            ray.put(output, request_result_object_id)
+            #print("finished task and put result into OID")
+
+        # join router again
+        self._router_handle.dequeue_request.remote(self.name, self._my_handle)
+
+    def set_my_handle(self, my_handle):
+        '''
+        Saves worker's own handle
+        '''
         self._my_handle = my_handle
 
-        # get an empty work intent from router
-        work_intent = ray.get(
-            self._router_handle.dequeue_request.remote(
-                self.name
-            )
-        )
+    def start(self):
+        '''
+        Makes the worker join the router queue
+        '''
+        self._router_handle.dequeue_request.remote(self.name, self._my_handle)
 
-        # wait for router to put request into work intent
-        #request = ray.get(ray.ObjectID(work_intent))
-        request = ray.get(work_intent)
-        request_result_object_id = request.result_object_id
-        request_body = request.request_body
-        print("received {}".format(request_body))
+@ray.remote
+class ImagePreprocWorker(Worker):
+    '''
+    Single worker that converts raw image to tensor and then predicts its class
+    '''
+    def __init__(self, name, router_handle, transform, model_name, is_cuda=False):
+        # imports needed
+        import io
+        import torch
+        import warnings
+        from PIL import Image
+        from torchvision import models
+        from torch.autograd import Variable
 
-        # execute request
-        output = self.func(request_body)
+        # initialize fields
+        super().__init__(name, router_handle, None)
+        self.transform = transform
+        self.model = models.__dict__[model_name](pretrained=True)
+        self.is_cuda = is_cuda
+        warnings.filterwarnings("ignore")
+        if is_cuda:
+            self.model = self.model.cuda()
 
-        # put output into result_id
-        #ray.worker.global_worker.put_object(output, request_result_object_id)
-        ray.put(output, request_result_object_id)
+        # set self.func
+        def call(request):
+            data = Image.open(io.BytesIO(request))
+            if data.mode != "RGB":
+                data = data.convert("RGB")
+            data = self.transform(data)
 
-        # recursively poll router again
-        self._my_handle.poll_router.remote(my_handle)
+            data = torch.stack([data])
+            data = Variable(data)
+            if self.is_cuda:
+                 data = data.cuda()
+            outputs = self.model(data)
+            _, predicted = outputs.max(1)
+
+            return predicted.cpu().numpy().tolist()[0]
+
+        self.func = call
