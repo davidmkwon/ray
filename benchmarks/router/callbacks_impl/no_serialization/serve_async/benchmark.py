@@ -27,11 +27,13 @@ def driver(num_warmups, num_queries, num_replicas, uv):
     pipeline_dict = {"A":"B", "B":None}
     source = "A"
 
-    serve.create_endpoint(noop, "A", config_A)
-    serve.create_endpoint(noop, "B", config_B)
-    serve.set_pipeline(pipeline_dict, source)
-    serve_handle = serve.get_handle()
+    with serve.using_router("noop"):
+        serve.create_endpoint(noop, "A", config_A)
+        serve.create_endpoint(noop, "B", config_B)
+        serve.set_pipeline(pipeline_dict, source)
+        serve_handle = serve.get_handle()
 
+    print("done!")
     mean_qps = 0.0
     AVG_CALC = 7
     mean_closed_loop = 0.0

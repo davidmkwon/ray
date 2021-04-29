@@ -78,6 +78,23 @@ class DequeRouter:
     def get_source(self):
         return self.source
 
+    def remove_and_destory_replica(self, backend_tag, replica_handle):
+        # TODO: add asyncio lock for when you modify queues?
+        old_queue = self.worker_queues[backend_tag]
+        new_queue = deque()
+        target_id = replica_handle._actor_id
+
+        # note: this is pretty inefficient algorithm because it forces copy
+        # of entire queue which should be unecessary given properties of deque
+        while old_queue.count() != 0:
+            replica_handle = old_queue.pop()
+            if replica_handle._actor_id != target_id:
+                new_queue.append(replica_handle)
+
+        self.worker_queues[backend] = new_queue
+        # better alternative to ray.kill()?
+        ray.kill(replica_handle)
+
     async def set_max_batch_size(self, service, max_batch_size):
         self.max_batch_size_dict[service] = max_batch_size
 
